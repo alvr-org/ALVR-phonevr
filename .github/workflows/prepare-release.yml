@@ -91,7 +91,7 @@ jobs:
           $file = Get-ChildItem -Name .\build\*.exe | Select-Object -f 1
           echo "::set-output name=exe_filename::$file"
 
-      # - name: Upload Windows installer (exe)
+      - name: Upload Windows installer (exe)
       #   uses: actions/upload-release-asset@v1
       #   env:
       #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
