@@ -891,12 +891,63 @@ void renderLobbyNative(const FfiViewInput eyeInputs[2]) {
     ovrRenderer_RenderFrame(g_ctx.lobbyRenderer.get(), eyeInputs, true);
 }
 
+// Pre call after the decoded Image is available from Stream.
+// Called before rendering to OpenGL
+// To be used by clients to manupulate streamBuffer before rendering
+extern "C" void renderStreamNativePre(void *streamBuffer);
+
+#include "compat/NdkImagePriv.h"
+#include "compat/NdkImageReaderPriv.h"
+
+// Move this to CpuConsumer_ALVR
+int getSlotofAcquiredBuffer(Mutex::Autolock mMutex, const CpuConsumer::LockedBuffer &nativeBuffer) {
+    Mutex::Autolock _l(mMutex);
+    size_t lockedIdx = 0;
+
+    // Get the Lock and Copy paste this code
+    void *bufPtr = reinterpret_cast<void *>(nativeBuffer.data);
+    for (; lockedIdx < static_cast<size_t>(mMaxLockedBuffers); lockedIdx++) {
+        if (bufPtr == mAcquiredBuffers[lockedIdx].mBufferPointer) break;
+    }
+    if (lockedIdx == mMaxLockedBuffers) {
+        CC_LOGE("%s: Can't find buffer to free", __FUNCTION__);
+        return -1;
+    }
+
+    return lockedIdx;
+}
+
 void renderStreamNative(void *streamHardwareBuffer, const unsigned int swapchainIndices[2]) {
     auto renderer = g_ctx.streamRenderer.get();
 
-    if (streamHardwareBuffer != 0) {
-        GL(EGLClientBuffer clientBuffer =
-               eglGetNativeClientBufferANDROID((const AHardwareBuffer *)streamHardwareBuffer));
+    if (streamHardwareBuffer != nullptr) {
+
+        renderStreamNativePre(streamHardwareBuffer);
+
+        AImage *imageObj = (AImage *)streamHardwareBuffer;
+        auto buffer = imageObj->mBuffer;
+        AImageReader *reader = imageObj->mReader.promote();
+        CpuConsumer *consumer = reader->mConsumer;
+        auto mLock = reader->mLock;
+        int slot = getSlotofAcquiredBuffer(mLock, *buffer);
+        ANativeWindowBuffer *windowBuffer = mConsumer->mAcquiredBuffers[slot].mNativeWindowBuffer;
+
+
+        // AImage* imageObj = (AImage *)streamHardwareBuffer;
+        // ImageReader -> CpuConsumer -> AcquiredBuffer -> GraphicBuffer -> ANativeWindowBuffer
+        // Cant do anything with AImage since it has someother format of data LockedBuffer which is not class of ANativeWindowBuffer
+
+        // CpuConsumer has acquiredBuffer, which dosent have slot link to Image/CpuLockedBuffer
+        // so we need to map Image/CpuLockedBuffer or CpuConsumer somehow to AcquiredBuffers then get the GraphicBuffer
+        
+        // get Image->mBuffer 
+            // Need AImage typedefs, since we are accessing its mBuffer
+            // Also type defs of mBuffer it CpuConsumer.h
+        // then do Searching like CpuConsumer.cpp::unlockBuffer -> getSlot
+        // then get CpuConsumer -> AcquiredBuffers -> slot -> mGraphicBuffer cast to ANativeWindowBuffer
+        // https://stackoverflow.com/questions/69687260/undefined-symbol-in-c-when-function-which-is-declared-in-header-is-custom-defi
+        GL(EGLClientBuffer clientBuffer = 
+                eglGetNativeClientBufferANDROID((windowBuffer));
         GL(EGLImageKHR image = eglCreateImageKHR(
                g_ctx.eglDisplay, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, clientBuffer, nullptr));
 

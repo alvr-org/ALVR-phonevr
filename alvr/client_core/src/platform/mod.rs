@@ -1,3 +1,4 @@
+// Comment the line before for shetty rust-analyzer to work
 #[cfg(target_os = "android")]
 pub mod android;
 

@@ -105,6 +105,8 @@ fn get_system_service<'a>(env: &mut JNIEnv<'a>, service_name: &str) -> JObject<'
 
 // Note: tried and failed to use libc
 pub fn local_ip() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(10,0,2,15))
+/*
     let vm = vm();
     let mut env = vm.attach_current_thread().unwrap();
 
@@ -127,7 +129,7 @@ pub fn local_ip() -> IpAddr {
 
     let ip_arr = ip_i32.to_le_bytes();
 
-    IpAddr::V4(Ipv4Addr::new(ip_arr[0], ip_arr[1], ip_arr[2], ip_arr[3]))
+    IpAddr::V4(Ipv4Addr::new(ip_arr[0], ip_arr[1], ip_arr[2], ip_arr[3]))*/
 }
 
 // This is needed to avoid wifi scans that disrupt streaming.

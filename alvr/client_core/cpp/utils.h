@@ -50,7 +50,7 @@ static const char *GlErrorString(GLenum error) {
         LOGE("GL error on %s : %d: %s", file, line, GlErrorString(error));
         error = glGetError();
     }
-    abort();
+    // abort();
 }
 
 #define GL(func)                                                                                   \

@@ -7,7 +7,7 @@ use alvr_common::{
 };
 use alvr_session::{CodecType, MediacodecDataType};
 use ndk::{
-    hardware_buffer::HardwareBufferUsage,
+    // hardware_buffer::HardwareBufferUsage,
     media::{
         image_reader::{Image, ImageFormat, ImageReader},
         media_codec::{
@@ -118,15 +118,19 @@ impl VideoDecoderSource {
         if let Some(queued_image) = image_queue_lock.front_mut() {
             queued_image.in_use = true;
 
+            // invoke private function of a impl in rust,
+
             Some((
                 queued_image.timestamp,
                 queued_image
                     .image
-                    .hardware_buffer()
-                    .unwrap()
+                    // .hardware_buffer()
+                    // .unwrap()
+                    // .inner
                     .as_ptr()
                     .cast(),
             ))
+            
         } else {
             // TODO: add back when implementing proper phase sync
             //warn!("Video frame queue underflow!");
@@ -206,11 +210,11 @@ pub fn video_decoder_split(
             // 2x: keep the target buffering in the middle of the max amount of queuable frames
             let available_buffering_frames = (2. * config.max_buffering_frames).ceil() as usize;
 
-            let mut image_reader = ImageReader::new_with_usage(
-                1,
-                1,
-                ImageFormat::PRIVATE,
-                HardwareBufferUsage::GPU_SAMPLED_IMAGE,
+            let mut image_reader = ImageReader::new( // _with_usage
+                3072,
+                1824,
+                ImageFormat::YUV_420_888,
+                // HardwareBufferUsage::GPU_SAMPLED_IMAGE,
                 MAX_BUFFERING_FRAMES as i32,
             )
             .unwrap();
@@ -257,9 +261,9 @@ pub fn video_decoder_split(
 
             // Documentation says that this call is necessary to properly dispose acquired buffers.
             // todo: find out how to use it and avoid leaking the ImageReader
-            image_reader
-                .set_buffer_removed_listener(Box::new(|_, _| ()))
-                .unwrap();
+            // image_reader
+            //     .set_buffer_removed_listener(Box::new(|_, _| ()))
+            //     .unwrap();
 
             let mime = mime_for_codec(config.codec);
 
