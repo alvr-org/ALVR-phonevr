@@ -1,5 +1,5 @@
 version: "1"
 rules:
   - base: master
-    upstream: alvr-org:master
+    upstream: alvr-org/ALVR:master
     mergeMethod: merge
