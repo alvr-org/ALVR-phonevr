@@ -1,0 +1,7 @@
+version: "1"
+rules:
+  - base: master
+    upstream: alvr-org:master
+    mergeMethod: rebase
+    conflictReviewers: # Optional, on merge conflict assign a reviewer
+      - ShootingKing-AM
