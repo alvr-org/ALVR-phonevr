@@ -9,14 +9,6 @@ pub enum OpenXRLoadersSelection {
     All,
 }
 
-pub fn update_submodules(sh: &Shell) {
-    let dir = sh.push_dir(afs::workspace_dir());
-    cmd!(sh, "git submodule update --init --recursive")
-        .run()
-        .unwrap();
-    std::mem::drop(dir);
-}
-
 pub fn choco_install(sh: &Shell, packages: &[&str]) -> Result<(), xshell::Error> {
     cmd!(
         sh,
@@ -69,14 +61,14 @@ pub fn prepare_ffmpeg_windows(deps_path: &Path) {
     command::download_and_extract_zip(
         &format!(
             "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/{}",
-            "ffmpeg-n5.1-latest-win64-gpl-shared-5.1.zip"
+            "ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip"
         ),
         deps_path,
     )
     .unwrap();
 
     fs::rename(
-        deps_path.join("ffmpeg-n5.1-latest-win64-gpl-shared-5.1"),
+        deps_path.join("ffmpeg-n7.1-latest-win64-gpl-shared-7.1"),
         deps_path.join("ffmpeg"),
     )
     .unwrap();
@@ -85,8 +77,6 @@ pub fn prepare_ffmpeg_windows(deps_path: &Path) {
 pub fn prepare_windows_deps(skip_admin_priv: bool) {
     let sh = Shell::new().unwrap();
 
-    update_submodules(&sh);
-
     let deps_path = afs::deps_dir().join("windows");
     sh.remove_path(&deps_path).ok();
     sh.create_dir(&deps_path).unwrap();
@@ -94,14 +84,7 @@ pub fn prepare_windows_deps(skip_admin_priv: bool) {
     if !skip_admin_priv {
         choco_install(
             &sh,
-            &[
-                "zip",
-                "unzip",
-                "llvm",
-                "vulkan-sdk",
-                "wixtoolset",
-                "pkgconfiglite",
-            ],
+            &["zip", "unzip", "llvm", "vulkan-sdk", "pkgconfiglite"],
         )
         .unwrap();
     }
@@ -112,8 +95,6 @@ pub fn prepare_windows_deps(skip_admin_priv: bool) {
 
 pub fn prepare_linux_deps(enable_nvenc: bool) {
     let sh = Shell::new().unwrap();
-
-    update_submodules(&sh);
 
     let deps_path = afs::deps_dir().join("linux");
     sh.remove_path(&deps_path).ok();
@@ -293,11 +274,7 @@ pub fn build_ffmpeg_linux(enable_nvenc: bool, deps_path: &Path) {
     cmd!(sh, "make install").run().unwrap();
 }
 
-pub fn prepare_macos_deps() {
-    let sh = Shell::new().unwrap();
-
-    update_submodules(&sh);
-}
+pub fn prepare_macos_deps() {}
 
 pub fn prepare_server_deps(
     platform: Option<BuildPlatform>,
@@ -389,8 +366,6 @@ pub fn build_android_deps(
     openxr_loaders_selection: OpenXRLoadersSelection,
 ) {
     let sh = Shell::new().unwrap();
-
-    update_submodules(&sh);
 
     if cfg!(windows) && !skip_admin_priv {
         choco_install(&sh, &["unzip", "llvm"]).unwrap();

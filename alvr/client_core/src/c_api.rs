@@ -1,5 +1,6 @@
+#![expect(dead_code)]
+
 use crate::{
-    graphics::{GraphicsContext, LobbyRenderer, LobbyViewParams, StreamRenderer, StreamViewParams},
     storage,
     video_decoder::{self, VideoDecoderConfig, VideoDecoderSource},
     ClientCapabilities, ClientCoreContext, ClientCoreEvent,
@@ -12,6 +13,9 @@ use alvr_common::{
     once_cell::sync::Lazy,
     parking_lot::Mutex,
     warn, DeviceMotion, Fov, OptLazy, Pose,
+};
+use alvr_graphics::{
+    GraphicsContext, LobbyRenderer, LobbyViewParams, StreamRenderer, StreamViewParams,
 };
 use alvr_packets::{ButtonEntry, ButtonValue, FaceData, ViewParams};
 use alvr_session::{CodecType, FoveatedEncodingConfig, MediacodecPropType, MediacodecProperty};
@@ -77,6 +81,8 @@ pub enum AlvrEvent {
     DecoderConfig {
         codec: AlvrCodec,
     },
+    // Unimplemented
+    RealTimeConfig {},
 }
 
 #[repr(C)]
@@ -369,6 +375,7 @@ pub extern "C" fn alvr_poll_event(out_event: *mut AlvrEvent) -> bool {
                         },
                     }
                 }
+                ClientCoreEvent::RealTimeConfig(_) => AlvrEvent::RealTimeConfig {},
             };
 
             unsafe { *out_event = event };
@@ -783,12 +790,11 @@ pub unsafe extern "C" fn alvr_start_stream_opengl(config: AlvrStreamConfig) {
         GRAPHICS_CONTEXT.with_borrow(|c| c.as_ref().unwrap().clone()),
         view_resolution,
         swapchain_textures,
-        glow::RGBA8,
+        alvr_graphics::SDR_FORMAT_GL,
         foveated_encoding,
         true,
         false, // TODO: limited range fix config
         1.0,   // TODO: encoding gamma config
-        None,  // TODO: passthrough config
     )));
 }
 
@@ -817,7 +823,9 @@ pub unsafe extern "C" fn alvr_render_lobby_opengl(
                 view_inputs,
                 [(None, None), (None, None)],
                 None,
+                None,
                 render_background,
+                false,
             );
         }
     });
@@ -847,6 +855,7 @@ pub unsafe extern "C" fn alvr_render_stream_opengl(
                         fov: from_capi_fov(right_params.fov),
                     },
                 ],
+                None,
             );
         }
     });
