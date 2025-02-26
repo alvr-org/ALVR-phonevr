@@ -4,47 +4,46 @@ const DIV1: f32 = 0.94786729857; // 1.0 / 1.055
 const THRESHOLD: f32 = 0.04045;
 const GAMMA: vec3f = vec3f(2.4);
 
-// Convert from limited colors to full
-const LIMITED_MIN: f32 = 0.06274509803; // 16.0 / 255.0
-const LIMITED_MAX: f32 = 0.92156862745; // 235.0 / 255.0
-
-override FIX_LIMITED_RANGE: bool;
 override ENABLE_SRGB_CORRECTION: bool;
 override ENCODING_GAMMA: f32;
 
 override ENABLE_FFE: bool = false;
 
-override VIEW_WIDTH_RATIO: f32 = 0.;
-override VIEW_HEIGHT_RATIO: f32 = 0.;
-override EDGE_X_RATIO: f32 = 0.;
-override EDGE_Y_RATIO: f32 = 0.;
+override VIEW_WIDTH_RATIO: f32 = 0.0;
+override VIEW_HEIGHT_RATIO: f32 = 0.0;
+override EDGE_X_RATIO: f32 = 0.0;
+override EDGE_Y_RATIO: f32 = 0.0;
 
-override C1_X: f32 = 0.;
-override C1_Y: f32 = 0.;
-override C2_X: f32 = 0.;
-override C2_Y: f32 = 0.;
-override LO_BOUND_X: f32 = 0.;
-override LO_BOUND_Y: f32 = 0.;
-override HI_BOUND_X: f32 = 0.;
-override HI_BOUND_Y: f32 = 0.;
+override C1_X: f32 = 0.0;
+override C1_Y: f32 = 0.0;
+override C2_X: f32 = 0.0;
+override C2_Y: f32 = 0.0;
+override LO_BOUND_X: f32 = 0.0;
+override LO_BOUND_Y: f32 = 0.0;
+override HI_BOUND_X: f32 = 0.0;
+override HI_BOUND_Y: f32 = 0.0;
 
-override A_LEFT_X: f32 = 0.;
-override A_LEFT_Y: f32 = 0.;
-override B_LEFT_X: f32 = 0.;
-override B_LEFT_Y: f32 = 0.;
+override A_LEFT_X: f32 = 0.0;
+override A_LEFT_Y: f32 = 0.0;
+override B_LEFT_X: f32 = 0.0;
+override B_LEFT_Y: f32 = 0.0;
 
-override A_RIGHT_X: f32 = 0.;
-override A_RIGHT_Y: f32 = 0.;
-override B_RIGHT_X: f32 = 0.;
-override B_RIGHT_Y: f32 = 0.;
-override C_RIGHT_X: f32 = 0.;
-override C_RIGHT_Y: f32 = 0.;
-
-override COLOR_ALPHA: f32 = 1.0;
+override A_RIGHT_X: f32 = 0.0;
+override A_RIGHT_Y: f32 = 0.0;
+override B_RIGHT_X: f32 = 0.0;
+override B_RIGHT_Y: f32 = 0.0;
+override C_RIGHT_X: f32 = 0.0;
+override C_RIGHT_Y: f32 = 0.0;
 
 struct PushConstant {
     reprojection_transform: mat4x4f,
     view_idx: u32,
+    passthrough_mode: u32, // 0: Blend, 1: RGB chroma key, 2: HSV chroma key
+    blend_alpha: f32,
+    _align: u32,
+    ck_channel0: vec4f,
+    ck_channel1: vec4f,
+    ck_channel2: vec4f,
 }
 var<push_constant> pc: PushConstant;
 
@@ -118,11 +117,6 @@ fn fragment_main(@location(0) uv: vec2f) -> @location(0) vec4f {
 
     var color = textureSample(stream_texture, stream_sampler, corrected_uv).rgb;
 
-    if FIX_LIMITED_RANGE {
-        // For some reason, the encoder shifts full-range color into the negatives and over one.
-        color = LIMITED_MIN + ((LIMITED_MAX - LIMITED_MIN) * color);
-    }
-
     if ENABLE_SRGB_CORRECTION {
         let condition = vec3f(f32(color.r < THRESHOLD), f32(color.g < THRESHOLD), f32(color.b < THRESHOLD));
         let lowValues = color * DIV12;
@@ -137,5 +131,55 @@ fn fragment_main(@location(0) uv: vec2f) -> @location(0) vec4f {
         color = enc_condition * enc_lowValues + (1.0 - enc_condition) * enc_highValues;
     }
 
-    return vec4f(color, COLOR_ALPHA);
+    var alpha = pc.blend_alpha; // Default to Blend passthrough mode
+    if pc.passthrough_mode != 0 { // Chroma key
+        var current = color;
+        if pc.passthrough_mode == 3 { // HSV mode
+            current = rgb_to_hsv(color);
+        }
+        let mask = chroma_key_mask(current);
+
+        // Note: because of this calculation, we require premultiplied alpha option in the XR layer
+        color = max(color * mask, vec3f(0.0));
+        alpha = mask;
+    }
+
+    return vec4f(color, alpha);
+}
+
+fn chroma_key_mask(color: vec3f) -> f32 {
+    let start_max = vec3f(pc.ck_channel0.x, pc.ck_channel1.x, pc.ck_channel2.x);
+    let start_min = vec3f(pc.ck_channel0.y, pc.ck_channel1.y, pc.ck_channel2.y);
+    let end_min = vec3f(pc.ck_channel0.z, pc.ck_channel1.z, pc.ck_channel2.z);
+    let end_max = vec3f(pc.ck_channel0.w, pc.ck_channel1.w, pc.ck_channel2.w);
+
+    let start_mask = smoothstep(start_min, start_max, color);
+    let end_mask = smoothstep(end_min, end_max, color);
+
+    return max(start_mask.x, max(start_mask.y, max(start_mask.z, max(end_mask.x, max(end_mask.y, end_mask.z)))));
+}
+
+fn rgb_to_hsv(rgb: vec3f) -> vec3f {
+    let cmax = max(rgb.r, max(rgb.g, rgb.b));
+    let cmin = min(rgb.r, min(rgb.g, rgb.b));
+    let delta = cmax - cmin;
+
+    var h = 0.0;
+    var s = 0.0;
+    let v = cmax;
+
+    if cmax > cmin {
+        s = delta / cmax;
+
+        if rgb.r == cmax {
+            h = (rgb.g - rgb.b) / delta;
+        } else if rgb.g == cmax {
+            h = 2.0 + (rgb.b - rgb.r) / delta;
+        } else {
+            h = 4.0 + (rgb.r - rgb.g) / delta;
+        }
+        h = fract(h / 6.0);
+    }
+
+    return vec3f(h, s, v);
 }

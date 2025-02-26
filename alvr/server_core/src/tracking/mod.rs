@@ -27,6 +27,7 @@ use alvr_session::{
 };
 use alvr_sockets::StreamReceiver;
 use std::{
+    cmp::Ordering,
     collections::{HashMap, VecDeque},
     f32::consts::PI,
     sync::Arc,
@@ -34,7 +35,6 @@ use std::{
 };
 
 const DEG_TO_RAD: f32 = PI / 180.0;
-const MAX_HISTORY_SIZE: usize = 8;
 
 #[derive(Debug)]
 pub enum HandType {
@@ -57,16 +57,18 @@ pub struct TrackingManager {
     device_motions_history: HashMap<u64, VecDeque<(Duration, DeviceMotion)>>,
     hand_skeletons_history: [VecDeque<(Duration, [Pose; 26])>; 2],
     last_face_data: FaceData,
+    max_history_size: usize,
 }
 
 impl TrackingManager {
-    pub fn new() -> TrackingManager {
+    pub fn new(max_history_size: usize) -> TrackingManager {
         TrackingManager {
             last_head_pose: Pose::default(),
             inverse_recentering_origin: Pose::default(),
             device_motions_history: HashMap::new(),
             hand_skeletons_history: [VecDeque::new(), VecDeque::new()],
             last_face_data: FaceData::default(),
+            max_history_size,
         }
     }
 
@@ -115,17 +117,13 @@ impl TrackingManager {
     }
 
     pub fn recenter_motion(&self, motion: DeviceMotion) -> DeviceMotion {
-        DeviceMotion {
-            pose: self.recenter_pose(motion.pose),
-            linear_velocity: self.inverse_recentering_origin.orientation * motion.linear_velocity,
-            angular_velocity: self.inverse_recentering_origin.orientation * motion.angular_velocity,
-        }
+        self.inverse_recentering_origin * motion
     }
 
     // Performs all kinds of tracking transformations, driven by settings.
     pub fn report_device_motions(
         &mut self,
-        config: &HeadsetConfig,
+        headset_config: &HeadsetConfig,
         timestamp: Duration,
         device_motions: &[(u64, DeviceMotion)],
     ) {
@@ -142,7 +140,7 @@ impl TrackingManager {
             (*BODY_RIGHT_FOOT_ID, MotionConfig::default()),
         ]);
 
-        if let Switch::Enabled(controllers) = &config.controllers {
+        if let Switch::Enabled(controllers) = &headset_config.controllers {
             let t = controllers.left_controller_position_offset;
             let r = controllers.left_controller_rotation_offset;
 
@@ -218,10 +216,10 @@ impl TrackingManager {
             }
 
             if let Some(motions) = self.device_motions_history.get_mut(&device_id) {
-                motions.push_back((timestamp, motion));
+                motions.push_front((timestamp, motion));
 
-                if motions.len() > MAX_HISTORY_SIZE {
-                    motions.pop_front();
+                if motions.len() > self.max_history_size {
+                    motions.pop_back();
                 }
             } else {
                 self.device_motions_history
@@ -230,6 +228,8 @@ impl TrackingManager {
         }
     }
 
+    // If the exact sample_timestamp is not found, use the closest one if it's not older. This makes
+    // sure that we return None if there is no newer sample and always return Some otherwise.
     pub fn get_device_motion(
         &self,
         device_id: u64,
@@ -238,10 +238,30 @@ impl TrackingManager {
         self.device_motions_history
             .get(&device_id)
             .and_then(|motions| {
-                motions
-                    .iter()
-                    .find(|(timestamp, _)| *timestamp == sample_timestamp)
-                    .map(|(_, motion)| *motion)
+                // Get first element to initialize a valid motion reference
+                if let Some((_, motion)) = motions.front() {
+                    let mut best_timestamp_diff = Duration::MAX;
+                    let mut best_motion_ref = motion;
+
+                    // Note: we are iterating from most recent to oldest
+                    for (ts, m) in motions {
+                        match ts.cmp(&sample_timestamp) {
+                            Ordering::Equal => return Some(*m),
+                            Ordering::Greater => {
+                                let diff = ts.saturating_sub(sample_timestamp);
+                                if diff < best_timestamp_diff {
+                                    best_timestamp_diff = diff;
+                                    best_motion_ref = m;
+                                }
+                            }
+                            Ordering::Less => continue,
+                        }
+                    }
+
+                    (best_timestamp_diff != Duration::MAX).then_some(*best_motion_ref)
+                } else {
+                    None
+                }
             })
     }
 
@@ -259,7 +279,7 @@ impl TrackingManager {
 
         skeleton_history.push_back((timestamp, skeleton));
 
-        if skeleton_history.len() > MAX_HISTORY_SIZE {
+        if skeleton_history.len() > self.max_history_size {
             skeleton_history.pop_front();
         }
     }
@@ -439,37 +459,41 @@ pub fn tracking_loop(
         ) {
             let mut hand_gesture_manager_lock = hand_gesture_manager.lock();
 
-            if let Some(hand_skeleton) = tracking.hand_skeletons[0] {
-                ctx.events_sender
-                    .send(ServerCoreEvent::Buttons(
-                        hand_gestures::trigger_hand_gesture_actions(
-                            gestures_button_mapping_manager,
-                            *HAND_LEFT_ID,
-                            &hand_gesture_manager_lock.get_active_gestures(
-                                hand_skeleton,
-                                gestures_config,
+            if !device_motion_keys.contains(&*HAND_LEFT_ID) {
+                if let Some(hand_skeleton) = tracking.hand_skeletons[0] {
+                    ctx.events_sender
+                        .send(ServerCoreEvent::Buttons(
+                            hand_gestures::trigger_hand_gesture_actions(
+                                gestures_button_mapping_manager,
                                 *HAND_LEFT_ID,
+                                &hand_gesture_manager_lock.get_active_gestures(
+                                    hand_skeleton,
+                                    gestures_config,
+                                    *HAND_LEFT_ID,
+                                ),
+                                gestures_config.only_touch,
                             ),
-                            gestures_config.only_touch,
-                        ),
-                    ))
-                    .ok();
+                        ))
+                        .ok();
+                }
             }
-            if let Some(hand_skeleton) = tracking.hand_skeletons[1] {
-                ctx.events_sender
-                    .send(ServerCoreEvent::Buttons(
-                        hand_gestures::trigger_hand_gesture_actions(
-                            gestures_button_mapping_manager,
-                            *HAND_RIGHT_ID,
-                            &hand_gesture_manager_lock.get_active_gestures(
-                                hand_skeleton,
-                                gestures_config,
+            if !device_motion_keys.contains(&*HAND_RIGHT_ID) {
+                if let Some(hand_skeleton) = tracking.hand_skeletons[1] {
+                    ctx.events_sender
+                        .send(ServerCoreEvent::Buttons(
+                            hand_gestures::trigger_hand_gesture_actions(
+                                gestures_button_mapping_manager,
                                 *HAND_RIGHT_ID,
+                                &hand_gesture_manager_lock.get_active_gestures(
+                                    hand_skeleton,
+                                    gestures_config,
+                                    *HAND_RIGHT_ID,
+                                ),
+                                gestures_config.only_touch,
                             ),
-                            gestures_config.only_touch,
-                        ),
-                    ))
-                    .ok();
+                        ))
+                        .ok();
+                }
             }
         }
 
@@ -496,13 +520,13 @@ pub fn tracking_loop(
                 let tracking_manager_lock = ctx.tracking_manager.read();
                 let device_motions = device_motion_keys
                     .iter()
-                    .filter_map(move |id| {
-                        Some((
+                    .map(move |id| {
+                        (
                             *id,
                             tracking_manager_lock
                                 .get_device_motion(*id, timestamp)
                                 .unwrap(),
-                        ))
+                        )
                     })
                     .collect::<Vec<(u64, DeviceMotion)>>();
 
@@ -525,13 +549,13 @@ pub fn tracking_loop(
                 let tracking_manager_lock = ctx.tracking_manager.read();
                 let device_motions = device_motion_keys
                     .iter()
-                    .filter_map(move |id| {
-                        Some((
+                    .map(move |id| {
+                        (
                             *id,
                             tracking_manager_lock
                                 .get_device_motion(*id, timestamp)
                                 .unwrap(),
-                        ))
+                        )
                     })
                     .collect::<Vec<_>>();
                 sink.send_tracking(&device_motions);

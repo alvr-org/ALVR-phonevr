@@ -11,16 +11,17 @@ use alvr_common::{
 };
 use glow::{self as gl, HasContext};
 use khronos_egl as egl;
-use std::{ffi::c_void, mem, num::NonZeroU32, ptr};
+use std::{ffi::c_void, num::NonZeroU32, ptr};
 use wgpu::{
     hal::{self, api, MemoryFlags, TextureUses},
-    Adapter, Device, Extent3d, Instance, InstanceDescriptor, InstanceFlags, Queue, Texture,
-    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
+    Adapter, Device, Extent3d, Instance, Queue, Texture, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureUsages, TextureView,
 };
 
 pub const SDR_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 pub const SDR_FORMAT_GL: u32 = gl::RGBA8;
 pub const GL_TEXTURE_EXTERNAL_OES: u32 = 0x8D65;
+pub const MAX_PUSH_CONSTANTS_SIZE: u32 = 128;
 
 type CreateImageFn = unsafe extern "C" fn(
     egl::EGLDisplay,
@@ -46,7 +47,7 @@ macro_rules! ck {
         let res = $gl_ctx.$($gl_cmd)*;
 
         #[cfg(debug_assertions)]
-        crate::graphics::check_error(&$gl_ctx, &format!("{}:{}: {}", file!(), line!(), stringify!($($gl_cmd)*)));
+        crate::check_error(&$gl_ctx, &format!("{}:{}: {}", file!(), line!(), stringify!($($gl_cmd)*)));
 
         res
     }};
@@ -135,25 +136,23 @@ fn create_texture_from_gles(
     };
 
     unsafe {
-        let hal_texture = device
-            .as_hal::<api::Gles, _, _>(|device| {
-                device.unwrap().texture_from_raw(
-                    NonZeroU32::new(texture).unwrap(),
-                    &hal::TextureDescriptor {
-                        label: None,
-                        size,
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: TextureDimension::D2,
-                        format,
-                        usage: TextureUses::COLOR_TARGET,
-                        memory_flags: MemoryFlags::empty(),
-                        view_formats: vec![],
-                    },
-                    Some(Box::new(())),
-                )
-            })
-            .unwrap();
+        let hal_texture = device.as_hal::<api::Gles, _, _>(|device| {
+            device.unwrap().texture_from_raw(
+                NonZeroU32::new(texture).unwrap(),
+                &hal::TextureDescriptor {
+                    label: None,
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: TextureDimension::D2,
+                    format,
+                    usage: TextureUses::COLOR_TARGET,
+                    memory_flags: MemoryFlags::empty(),
+                    view_formats: vec![],
+                },
+                Some(Box::new(|| ())),
+            )
+        });
 
         device.create_texture_from_hal::<api::Gles>(
             hal_texture,
@@ -189,14 +188,20 @@ pub fn create_gl_swapchain(
 
 pub struct GraphicsContext {
     _instance: Instance,
+
+    #[cfg_attr(windows, expect(dead_code))]
     adapter: Adapter,
+
     device: Device,
     queue: Queue,
     pub egl_display: egl::Display,
     pub egl_config: egl::Config,
     pub egl_context: egl::Context,
     pub gl_context: gl::Context,
+
+    #[cfg_attr(windows, expect(dead_code))]
     dummy_surface: egl::Surface,
+
     create_image: CreateImageFn,
     destroy_image: DestroyImageFn,
     get_native_client_buffer: GetNativeClientBufferFn,
@@ -206,7 +211,11 @@ pub struct GraphicsContext {
 impl GraphicsContext {
     #[cfg(not(windows))]
     pub fn new_gl() -> Self {
-        use wgpu::{Backends, DeviceDescriptor, Features, Limits};
+        use std::mem;
+        use wgpu::{
+            Backends, DeviceDescriptor, Features, InstanceDescriptor, InstanceFlags, Limits,
+            MemoryHints,
+        };
 
         const CREATE_IMAGE_FN_STR: &str = "eglCreateImageKHR";
         const DESTROY_IMAGE_FN_STR: &str = "eglDestroyImageKHR";
@@ -219,11 +228,10 @@ impl GraphicsContext {
             InstanceFlags::empty()
         };
 
-        let instance = Instance::new(InstanceDescriptor {
+        let instance = Instance::new(&InstanceDescriptor {
             backends: Backends::GL,
             flags,
-            dx12_shader_compiler: Default::default(),
-            gles_minor_version: Default::default(),
+            backend_options: Default::default(),
         });
 
         let adapter = instance.enumerate_adapters(Backends::GL).remove(0);
@@ -232,9 +240,10 @@ impl GraphicsContext {
                 label: None,
                 required_features: Features::PUSH_CONSTANTS,
                 required_limits: Limits {
-                    max_push_constant_size: 72,
+                    max_push_constant_size: MAX_PUSH_CONSTANTS_SIZE,
                     ..adapter.limits()
                 },
+                memory_hints: MemoryHints::Performance,
             },
             None,
         ))

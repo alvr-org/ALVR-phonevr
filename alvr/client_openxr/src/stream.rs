@@ -3,9 +3,8 @@ use crate::{
     interaction::{self, InteractionContext, InteractionSourcesConfig},
 };
 use alvr_client_core::{
-    graphics::{GraphicsContext, StreamRenderer, StreamViewParams},
     video_decoder::{self, VideoDecoderConfig, VideoDecoderSource},
-    ClientCoreContext, Platform,
+    ClientCoreContext,
 };
 use alvr_common::{
     anyhow::Result,
@@ -14,11 +13,13 @@ use alvr_common::{
     parking_lot::RwLock,
     Pose, RelaxedAtomic, HAND_LEFT_ID, HAND_RIGHT_ID, HEAD_ID,
 };
-use alvr_packets::{FaceData, StreamConfig, ViewParams};
+use alvr_graphics::{GraphicsContext, StreamRenderer, StreamViewParams};
+use alvr_packets::{FaceData, RealTimeConfig, StreamConfig, ViewParams};
 use alvr_session::{
     ClientsideFoveationConfig, ClientsideFoveationMode, CodecType, FoveatedEncodingConfig,
     MediacodecProperty, PassthroughMode,
 };
+use alvr_system_info::Platform;
 use openxr as xr;
 use std::{
     ptr,
@@ -33,6 +34,7 @@ const DECODER_MAX_TIMEOUT_MULTIPLIER: f32 = 0.8;
 pub struct ParsedStreamConfig {
     pub view_resolution: UVec2,
     pub refresh_rate_hint: f32,
+    pub use_full_range: bool,
     pub encoding_gamma: f32,
     pub enable_hdr: bool,
     pub passthrough: Option<PassthroughMode>,
@@ -50,6 +52,7 @@ impl ParsedStreamConfig {
         Self {
             view_resolution: config.negotiated_config.view_resolution,
             refresh_rate_hint: config.negotiated_config.refresh_rate_hint,
+            use_full_range: config.negotiated_config.use_full_range,
             encoding_gamma: config.negotiated_config.encoding_gamma,
             enable_hdr: config.negotiated_config.enable_hdr,
             passthrough: config.settings.video.passthrough.as_option().cloned(),
@@ -76,9 +79,9 @@ impl ParsedStreamConfig {
 pub struct StreamContext {
     core_context: Arc<ClientCoreContext>,
     xr_session: xr::Session<xr::OpenGlEs>,
-    platform: Platform,
     interaction_context: Arc<RwLock<InteractionContext>>,
-    reference_space: Arc<xr::Space>,
+    stage_reference_space: Arc<xr::Space>,
+    view_reference_space: Arc<xr::Space>,
     swapchains: [xr::Swapchain<xr::OpenGlEs>; 2],
     last_good_view_params: [ViewParams; 2],
     input_thread: Option<JoinHandle<()>>,
@@ -180,16 +183,8 @@ impl StreamContext {
             format,
             config.foveated_encoding_config.clone(),
             platform != Platform::Lynx && !((platform.is_pico()) && config.enable_hdr),
-            !config.enable_hdr,
+            config.use_full_range && !config.enable_hdr, // TODO: figure out why HDR doesn't need the limited range hackfix in staging?
             config.encoding_gamma,
-            config.passthrough.clone(),
-        );
-
-        core_ctx.send_playspace(
-            xr_session
-                .reference_space_bounds_rect(xr::ReferenceSpaceType::STAGE)
-                .unwrap()
-                .map(|a| Vec2::new(a.width, a.height)),
         );
 
         core_ctx.send_active_interaction_profile(
@@ -201,46 +196,35 @@ impl StreamContext {
             interaction_ctx.read().hands_interaction[1].controllers_profile_id,
         );
 
-        let input_thread_running = Arc::new(RelaxedAtomic::new(true));
+        let input_thread_running = Arc::new(RelaxedAtomic::new(false));
 
-        let reference_space = Arc::new(interaction::get_reference_space(
+        let stage_reference_space = Arc::new(interaction::get_reference_space(
             &xr_session,
             xr::ReferenceSpaceType::STAGE,
         ));
+        let view_reference_space = Arc::new(interaction::get_reference_space(
+            &xr_session,
+            xr::ReferenceSpaceType::VIEW,
+        ));
 
-        let input_thread = thread::spawn({
-            let core_ctx = Arc::clone(&core_ctx);
-            let xr_session = xr_session.clone();
-            let interaction_ctx = Arc::clone(&interaction_ctx);
-            let reference_space = Arc::clone(&reference_space);
-            let refresh_rate = config.refresh_rate_hint;
-            let running = Arc::clone(&input_thread_running);
-            move || {
-                stream_input_loop(
-                    &core_ctx,
-                    xr_session,
-                    &interaction_ctx,
-                    Arc::clone(&reference_space),
-                    refresh_rate,
-                    running,
-                )
-            }
-        });
-
-        StreamContext {
+        let mut this = StreamContext {
             core_context: core_ctx,
             xr_session,
-            platform,
             interaction_context: interaction_ctx,
-            reference_space,
+            stage_reference_space,
+            view_reference_space,
             swapchains,
             last_good_view_params: [ViewParams::default(); 2],
-            input_thread: Some(input_thread),
+            input_thread: None,
             input_thread_running,
             config,
             renderer,
             decoder: None,
-        }
+        };
+
+        this.update_reference_space();
+
+        this
     }
 
     pub fn uses_passthrough(&self) -> bool {
@@ -250,9 +234,13 @@ impl StreamContext {
     pub fn update_reference_space(&mut self) {
         self.input_thread_running.set(false);
 
-        self.reference_space = Arc::new(interaction::get_reference_space(
+        self.stage_reference_space = Arc::new(interaction::get_reference_space(
             &self.xr_session,
             xr::ReferenceSpaceType::STAGE,
+        ));
+        self.view_reference_space = Arc::new(interaction::get_reference_space(
+            &self.xr_session,
+            xr::ReferenceSpaceType::VIEW,
         ));
 
         self.core_context.send_playspace(
@@ -272,7 +260,8 @@ impl StreamContext {
             let core_ctx = Arc::clone(&self.core_context);
             let xr_session = self.xr_session.clone();
             let interaction_ctx = Arc::clone(&self.interaction_context);
-            let reference_space = Arc::clone(&self.reference_space);
+            let stage_reference_space = Arc::clone(&self.stage_reference_space);
+            let view_reference_space = Arc::clone(&self.view_reference_space);
             let refresh_rate = self.config.refresh_rate_hint;
             let running = Arc::clone(&self.input_thread_running);
             move || {
@@ -280,7 +269,8 @@ impl StreamContext {
                     &core_ctx,
                     xr_session,
                     &interaction_ctx,
-                    Arc::clone(&reference_space),
+                    &stage_reference_space,
+                    &view_reference_space,
                     refresh_rate,
                     running,
                 )
@@ -318,6 +308,10 @@ impl StreamContext {
                 move |timestamp, buffer| -> bool { sink.push_nal(timestamp, buffer) },
             ));
         }
+    }
+
+    pub fn update_real_time_config(&mut self, config: &RealTimeConfig) {
+        self.config.passthrough = config.passthrough.clone();
     }
 
     pub fn render(
@@ -377,6 +371,7 @@ impl StreamContext {
                         fov: view_params[1].fov,
                     },
                 ],
+                self.config.passthrough.as_ref(),
             )
         };
 
@@ -384,7 +379,7 @@ impl StreamContext {
         self.swapchains[1].release_image().unwrap();
 
         if !buffer_ptr.is_null() {
-            if let Some(xr_now) = crate::xr_runtime_now(&self.xr_session.instance()) {
+            if let Some(xr_now) = crate::xr_runtime_now(self.xr_session.instance()) {
                 self.core_context.report_submit(
                     timestamp,
                     vsync_time.saturating_sub(Duration::from_nanos(xr_now.as_nanos() as u64)),
@@ -401,7 +396,7 @@ impl StreamContext {
         };
 
         let layer = ProjectionLayerBuilder::new(
-            &self.reference_space,
+            &self.stage_reference_space,
             [
                 xr::CompositionLayerProjectionView::new()
                     .pose(crate::to_xr_pose(view_params[0].pose))
@@ -426,7 +421,14 @@ impl StreamContext {
                 .passthrough
                 .clone()
                 .map(|mode| ProjectionLayerAlphaConfig {
-                    premultiplied: !matches!(mode, PassthroughMode::Blend { .. }),
+                    premultiplied: matches!(
+                        mode,
+                        PassthroughMode::Blend {
+                            premultiplied_alpha: true,
+                            ..
+                        } | PassthroughMode::RgbChromaKey(_)
+                            | PassthroughMode::HsvChromaKey(_)
+                    ),
                 }),
         );
 
@@ -445,10 +447,13 @@ fn stream_input_loop(
     core_ctx: &ClientCoreContext,
     xr_session: xr::Session<xr::OpenGlEs>,
     interaction_ctx: &RwLock<InteractionContext>,
-    reference_space: Arc<xr::Space>,
+    stage_reference_space: &xr::Space,
+    view_reference_space: &xr::Space,
     refresh_rate: f32,
     running: Arc<RelaxedAtomic>,
 ) {
+    let platform = alvr_system_info::platform();
+
     let mut last_controller_poses = [Pose::default(); 2];
     let mut last_palm_poses = [Pose::default(); 2];
     let mut last_view_params = [ViewParams::default(); 2];
@@ -464,14 +469,23 @@ fn stream_input_loop(
             return;
         }
 
-        let Some(xr_now) = crate::xr_runtime_now(&xr_session.instance()) else {
+        let Some(now) = crate::xr_runtime_now(xr_session.instance()).map(crate::from_xr_time)
+        else {
             error!("Cannot poll tracking: invalid time");
             return;
         };
 
-        let Some((head_motion, local_views)) =
-            interaction::get_head_data(&xr_session, &reference_space, xr_now, &last_view_params)
-        else {
+        let target_time = now + core_ctx.get_total_prediction_offset();
+
+        let Some((head_motion, local_views)) = interaction::get_head_data(
+            &xr_session,
+            platform,
+            stage_reference_space,
+            view_reference_space,
+            now,
+            target_time,
+            &last_view_params,
+        ) else {
             continue;
         };
 
@@ -486,16 +500,20 @@ fn stream_input_loop(
 
         let (left_hand_motion, left_hand_skeleton) = crate::interaction::get_hand_data(
             &xr_session,
-            &reference_space,
-            xr_now,
+            platform,
+            stage_reference_space,
+            now,
+            target_time,
             &int_ctx.hands_interaction[0],
             &mut last_controller_poses[0],
             &mut last_palm_poses[0],
         );
         let (right_hand_motion, right_hand_skeleton) = crate::interaction::get_hand_data(
             &xr_session,
-            &reference_space,
-            xr_now,
+            platform,
+            stage_reference_space,
+            now,
+            target_time,
             &int_ctx.hands_interaction[1],
             &mut last_controller_poses[1],
             &mut last_palm_poses[1],
@@ -518,25 +536,35 @@ fn stream_input_loop(
             eye_gazes: interaction::get_eye_gazes(
                 &xr_session,
                 &int_ctx.face_sources,
-                &reference_space,
-                xr_now,
+                stage_reference_space,
+                now,
             ),
-            fb_face_expression: interaction::get_fb_face_expression(&int_ctx.face_sources, xr_now),
-            htc_eye_expression: interaction::get_htc_eye_expression(&int_ctx.face_sources),
-            htc_lip_expression: interaction::get_htc_lip_expression(&int_ctx.face_sources),
+            fb_face_expression: interaction::get_fb_face_expression(&int_ctx.face_sources, now).or(
+                interaction::get_pico_face_expression(&int_ctx.face_sources, now),
+            ),
+            htc_eye_expression: interaction::get_htc_eye_expression(&int_ctx.face_sources, now),
+            htc_lip_expression: interaction::get_htc_lip_expression(&int_ctx.face_sources, now),
         };
 
         if let Some((tracker, joint_count)) = &int_ctx.body_sources.body_tracker_fb {
             device_motions.append(&mut interaction::get_fb_body_tracking_points(
-                &reference_space,
-                xr_now,
+                stage_reference_space,
+                now,
                 tracker,
                 *joint_count,
             ));
         }
 
+        if let Some(tracker) = &int_ctx.body_sources.body_tracker_bd {
+            device_motions.append(&mut interaction::get_bd_body_tracking_points(
+                stage_reference_space,
+                now,
+                tracker,
+            ));
+        }
+
         core_ctx.send_tracking(
-            Duration::from_nanos(xr_now.as_nanos() as u64),
+            Duration::from_nanos(now.as_nanos() as u64),
             device_motions,
             [left_hand_skeleton, right_hand_skeleton],
             face_data,

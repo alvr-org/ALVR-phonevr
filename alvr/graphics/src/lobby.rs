@@ -1,24 +1,43 @@
-use super::{GraphicsContext, SDR_FORMAT};
+use super::{GraphicsContext, MAX_PUSH_CONSTANTS_SIZE, SDR_FORMAT};
 use alvr_common::{
     glam::{IVec2, Mat4, Quat, UVec2, Vec3},
-    Fov, Pose,
+    DeviceMotion, Fov, Pose,
 };
 use glyph_brush_layout::{
     ab_glyph::{Font, FontRef, ScaleFont},
     FontId, GlyphPositioner, HorizontalAlign, Layout, SectionGeometry, SectionText, VerticalAlign,
 };
-use std::{f32::consts::FRAC_PI_2, rc::Rc};
+use std::{f32::consts::FRAC_PI_2, mem, rc::Rc};
 use wgpu::{
     include_wgsl, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendComponent,
     BlendFactor, BlendOperation, BlendState, Color, ColorTargetState, ColorWrites,
-    CommandEncoderDescriptor, Device, Extent3d, FilterMode, FragmentState, ImageCopyTexture,
-    ImageDataLayout, LoadOp, Operations, Origin3d, PipelineLayoutDescriptor, PrimitiveState,
-    PrimitiveTopology, PushConstantRange, RenderPass, RenderPassColorAttachment,
-    RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, SamplerBindingType,
-    SamplerDescriptor, ShaderModuleDescriptor, ShaderStages, StoreOp, Texture, TextureAspect,
+    CommandEncoderDescriptor, Device, Extent3d, FilterMode, FragmentState, LoadOp, Operations,
+    Origin3d, PipelineLayoutDescriptor, PrimitiveState, PrimitiveTopology, PushConstantRange,
+    RenderPass, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
+    RenderPipelineDescriptor, SamplerBindingType, SamplerDescriptor, ShaderModuleDescriptor,
+    ShaderStages, StoreOp, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureAspect,
     TextureSampleType, TextureView, TextureViewDimension, VertexState,
 };
+
+const TRANSFORM_CONST_SIZE: u32 = mem::size_of::<Mat4>() as u32;
+const OBJECT_TYPE_CONST_SIZE: u32 = mem::size_of::<u32>() as u32;
+const FLOOR_SIDE_CONST_SIZE: u32 = mem::size_of::<f32>() as u32;
+const COLOR_CONST_SIZE: u32 = mem::size_of::<u32>() as u32;
+
+const QUAD_PUSH_CONTANTS_SIZE: u32 =
+    TRANSFORM_CONST_SIZE + OBJECT_TYPE_CONST_SIZE + FLOOR_SIDE_CONST_SIZE;
+const LINE_PUSH_CONTANTS_SIZE: u32 = TRANSFORM_CONST_SIZE + COLOR_CONST_SIZE;
+const _: () = assert!(
+    QUAD_PUSH_CONTANTS_SIZE <= MAX_PUSH_CONSTANTS_SIZE
+        && LINE_PUSH_CONTANTS_SIZE <= MAX_PUSH_CONSTANTS_SIZE,
+    "Push constants size exceeds the maximum size"
+);
+
+const TRANSFORM_CONST_OFFSET: u32 = 0;
+const OBJECT_TYPE_CONST_OFFSET: u32 = TRANSFORM_CONST_SIZE;
+const FLOOR_SIDE_CONST_OFFSET: u32 = OBJECT_TYPE_CONST_OFFSET + OBJECT_TYPE_CONST_SIZE;
+const COLOR_CONST_OFFSET: u32 = TRANSFORM_CONST_SIZE;
 
 const FLOOR_SIDE: f32 = 300.0;
 const HUD_DIST: f32 = 5.0;
@@ -103,6 +122,42 @@ const BODY_SKELETON_BONES_FB: [(usize, usize); 30] = [
     (82, 83),
 ];
 
+const BODY_SKELETON_BONES_BD: [(usize, usize); 23] = [
+    // Left leg
+    (0, 1),
+    (1, 4),
+    (4, 7),
+    (7, 10),
+    // Right leg
+    (0, 2),
+    (2, 5),
+    (5, 8),
+    (8, 11),
+    // Spine
+    (0, 3),
+    (3, 6),
+    (6, 9),
+    (9, 12),
+    (12, 15),
+    // Left arm
+    (9, 13),
+    (13, 16),
+    (16, 18),
+    (18, 20),
+    (20, 22),
+    // Right arm
+    (9, 14),
+    (14, 17),
+    (17, 19),
+    (19, 21),
+    (21, 23),
+];
+
+pub enum BodyTrackingType {
+    Meta,
+    Pico,
+}
+
 fn create_pipeline(
     device: &Device,
     label: &str,
@@ -125,7 +180,7 @@ fn create_pipeline(
         })),
         vertex: VertexState {
             module: &shader_module,
-            entry_point: "vertex_main",
+            entry_point: None,
             compilation_options: Default::default(),
             buffers: &[],
         },
@@ -137,7 +192,7 @@ fn create_pipeline(
         multisample: Default::default(),
         fragment: Some(FragmentState {
             module: &shader_module,
-            entry_point: "fragment_main",
+            entry_point: None,
             compilation_options: Default::default(),
             targets: &[Some(ColorTargetState {
                 format: SDR_FORMAT,
@@ -157,6 +212,7 @@ fn create_pipeline(
             })],
         }),
         multiview: None,
+        cache: None,
     })
 }
 
@@ -213,8 +269,8 @@ impl LobbyRenderer {
             device,
             "lobby_quad",
             &[&bind_group_layout],
-            72,
-            include_wgsl!("../../resources/lobby_quad.wgsl"),
+            QUAD_PUSH_CONTANTS_SIZE,
+            include_wgsl!("../resources/lobby_quad.wgsl"),
             PrimitiveTopology::TriangleStrip,
         );
 
@@ -222,8 +278,8 @@ impl LobbyRenderer {
             device,
             "lobby_line",
             &[],
-            64,
-            include_wgsl!("../../resources/lobby_line.wgsl"),
+            LINE_PUSH_CONTANTS_SIZE,
+            include_wgsl!("../resources/lobby_line.wgsl"),
             PrimitiveTopology::LineList,
         );
 
@@ -271,7 +327,7 @@ impl LobbyRenderer {
 
     pub fn update_hud_message(&self, message: &str) {
         let ubuntu_font =
-            FontRef::try_from_slice(include_bytes!("../../resources/Ubuntu-Medium.ttf")).unwrap();
+            FontRef::try_from_slice(include_bytes!("../resources/Ubuntu-Medium.ttf")).unwrap();
 
         let section_glyphs = Layout::default()
             .h_align(HorizontalAlign::Center)
@@ -329,14 +385,14 @@ impl LobbyRenderer {
         }
 
         self.context.queue.write_texture(
-            ImageCopyTexture {
+            TexelCopyTextureInfo {
                 texture: &self.hud_texture,
                 mip_level: 0,
                 origin: Origin3d::ZERO,
                 aspect: TextureAspect::All,
             },
             &buffer,
-            ImageDataLayout {
+            TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(HUD_TEXTURE_SIDE as u32 * 4),
                 rows_per_image: Some(HUD_TEXTURE_SIDE as u32),
@@ -352,9 +408,11 @@ impl LobbyRenderer {
     pub fn render(
         &self,
         view_params: [LobbyViewParams; 2],
-        hand_data: [(Option<Pose>, Option<[Pose; 26]>); 2],
-        body_skeleton_fb: Option<Vec<Option<Pose>>>,
+        hand_data: [(Option<DeviceMotion>, Option<[Pose; 26]>); 2],
+        body_skeleton: Option<Vec<Option<Pose>>>,
+        body_tracking_type: Option<BodyTrackingType>,
         render_background: bool,
+        show_velocities: bool,
     ) {
         let mut encoder = self
             .context
@@ -401,7 +459,11 @@ impl LobbyRenderer {
                     .iter()
                     .flat_map(|v| v.to_le_bytes())
                     .collect::<Vec<u8>>();
-                pass.set_push_constants(ShaderStages::VERTEX_FRAGMENT, 0, &data);
+                pass.set_push_constants(
+                    ShaderStages::VERTEX_FRAGMENT,
+                    TRANSFORM_CONST_OFFSET,
+                    &data,
+                );
                 pass.draw(0..vertices_count, 0..1);
             }
 
@@ -413,10 +475,14 @@ impl LobbyRenderer {
 
             if render_background {
                 // Render ground
-                pass.set_push_constants(ShaderStages::VERTEX_FRAGMENT, 64, &0_u32.to_le_bytes());
                 pass.set_push_constants(
                     ShaderStages::VERTEX_FRAGMENT,
-                    68,
+                    OBJECT_TYPE_CONST_OFFSET,
+                    &0_u32.to_le_bytes(),
+                );
+                pass.set_push_constants(
+                    ShaderStages::VERTEX_FRAGMENT,
+                    FLOOR_SIDE_CONST_OFFSET,
                     &FLOOR_SIDE.to_le_bytes(),
                 );
                 let transform = view_proj
@@ -426,7 +492,11 @@ impl LobbyRenderer {
             }
 
             // Render HUD
-            pass.set_push_constants(ShaderStages::VERTEX_FRAGMENT, 64, &1_u32.to_le_bytes());
+            pass.set_push_constants(
+                ShaderStages::VERTEX_FRAGMENT,
+                OBJECT_TYPE_CONST_OFFSET,
+                &1_u32.to_le_bytes(),
+            );
             for i in 0..4 {
                 let transform = Mat4::from_rotation_y(FRAC_PI_2 * i as f32)
                     * Mat4::from_translation(Vec3::new(0.0, HUD_SIDE / 2.0, -HUD_DIST))
@@ -436,8 +506,14 @@ impl LobbyRenderer {
 
             // Render hands and body skeleton
             pass.set_pipeline(&self.line_pipeline);
-            for (maybe_pose, maybe_skeleton) in &hand_data {
+            for (maybe_motion, maybe_skeleton) in &hand_data {
                 if let Some(skeleton) = maybe_skeleton {
+                    pass.set_push_constants(
+                        ShaderStages::VERTEX_FRAGMENT,
+                        COLOR_CONST_OFFSET,
+                        &[255, 255, 255, 255],
+                    );
+
                     for (joint1_idx, joint2_idx) in HAND_SKELETON_BONES {
                         let j1_pose = skeleton[joint1_idx];
                         let j2_pose = skeleton[joint2_idx];
@@ -451,18 +527,24 @@ impl LobbyRenderer {
                     }
                 }
 
-                if let Some(pose) = maybe_pose {
+                if let Some(motion) = maybe_motion {
                     let hand_transform = Mat4::from_scale_rotation_translation(
                         Vec3::ONE * 0.2,
-                        pose.orientation,
-                        pose.position,
+                        motion.pose.orientation,
+                        motion.pose.position,
                     );
 
+                    // Draw crossair
                     let segment_rotations = [
                         Mat4::IDENTITY,
                         Mat4::from_rotation_y(FRAC_PI_2),
                         Mat4::from_rotation_x(FRAC_PI_2),
                     ];
+                    pass.set_push_constants(
+                        ShaderStages::VERTEX_FRAGMENT,
+                        COLOR_CONST_OFFSET,
+                        &[255, 255, 255, 255],
+                    );
                     for rot in &segment_rotations {
                         let transform = hand_transform
                             * *rot
@@ -470,12 +552,47 @@ impl LobbyRenderer {
                             * Mat4::from_translation(Vec3::Z * 0.5);
                         transform_draw(&mut pass, view_proj * transform, 2);
                     }
+
+                    if show_velocities {
+                        // Draw linear velocity
+                        let transform = Mat4::from_scale_rotation_translation(
+                            Vec3::ONE * motion.linear_velocity.length() * 0.2,
+                            Quat::from_rotation_arc(-Vec3::Z, motion.linear_velocity.normalize()),
+                            motion.pose.position,
+                        );
+                        pass.set_push_constants(
+                            ShaderStages::VERTEX_FRAGMENT,
+                            COLOR_CONST_OFFSET,
+                            &[255, 0, 0, 255],
+                        );
+                        transform_draw(&mut pass, view_proj * transform, 2);
+
+                        // Draw angular velocity
+                        let transform = Mat4::from_scale_rotation_translation(
+                            Vec3::ONE * motion.angular_velocity.length() * 0.01,
+                            Quat::from_rotation_arc(-Vec3::Z, motion.angular_velocity.normalize()),
+                            motion.pose.position,
+                        );
+                        pass.set_push_constants(
+                            ShaderStages::VERTEX_FRAGMENT,
+                            COLOR_CONST_OFFSET,
+                            &[0, 255, 0, 255],
+                        );
+                        transform_draw(&mut pass, view_proj * transform, 2);
+                    }
                 }
             }
-            if let Some(skeleton) = &body_skeleton_fb {
-                for (joint1_idx, joint2_idx) in BODY_SKELETON_BONES_FB {
+
+            let body_skeleton_bones = match body_tracking_type {
+                Some(BodyTrackingType::Meta) => Some(BODY_SKELETON_BONES_FB.as_slice()),
+                Some(BodyTrackingType::Pico) => Some(BODY_SKELETON_BONES_BD.as_slice()),
+                _ => None,
+            };
+
+            if let (Some(skeleton), Some(skeleton_bones)) = (&body_skeleton, body_skeleton_bones) {
+                for (joint1_idx, joint2_idx) in skeleton_bones {
                     if let (Some(Some(j1_pose)), Some(Some(j2_pose))) =
-                        (skeleton.get(joint1_idx), skeleton.get(joint2_idx))
+                        (skeleton.get(*joint1_idx), skeleton.get(*joint2_idx))
                     {
                         let transform = Mat4::from_scale_rotation_translation(
                             Vec3::ONE * Vec3::distance(j1_pose.position, j2_pose.position),

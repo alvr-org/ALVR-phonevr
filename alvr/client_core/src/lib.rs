@@ -15,22 +15,21 @@ mod storage;
 #[cfg(target_os = "android")]
 mod audio;
 
-pub mod graphics;
 pub mod video_decoder;
 
 use alvr_common::{
     dbg_client_core, error,
-    glam::{Quat, UVec2, Vec2, Vec3},
+    glam::{UVec2, Vec2, Vec3},
     parking_lot::{Mutex, RwLock},
     warn, ConnectionState, DeviceMotion, LifecycleState, Pose, HAND_LEFT_ID, HAND_RIGHT_ID,
     HEAD_ID,
 };
 use alvr_packets::{
-    BatteryInfo, ButtonEntry, ClientControlPacket, FaceData, ReservedClientControlPacket,
-    StreamConfig, Tracking, ViewParams, ViewsConfig,
+    BatteryInfo, ButtonEntry, ClientControlPacket, FaceData, RealTimeConfig,
+    ReservedClientControlPacket, StreamConfig, Tracking, ViewParams, ViewsConfig,
 };
 use alvr_session::CodecType;
-use connection::ConnectionContext;
+use connection::{ConnectionContext, DecoderCallback};
 use std::{
     collections::{HashSet, VecDeque},
     sync::Arc,
@@ -39,7 +38,6 @@ use std::{
 };
 use storage::Config;
 
-pub use alvr_system_info::Platform;
 pub use logging_backend::init_logging;
 
 pub enum ClientCoreEvent {
@@ -57,6 +55,7 @@ pub enum ClientCoreEvent {
         codec: CodecType,
         config_nal: Vec<u8>,
     },
+    RealTimeConfig(RealTimeConfig),
 }
 
 // Note: this struct may change without breaking network protocol changes
@@ -234,20 +233,30 @@ impl ClientCoreContext {
     ) {
         dbg_client_core!("send_tracking");
 
-        let target_timestamp =
-            if let Some(stats) = &*self.connection_context.statistics_manager.lock() {
-                poll_timestamp + stats.average_total_pipeline_latency()
-            } else {
-                poll_timestamp
-            };
+        let max_prediction = *self.connection_context.max_prediction.read();
+
+        let target_timestamp = if let Some(stats) =
+            &*self.connection_context.statistics_manager.lock()
+        {
+            poll_timestamp + Duration::min(stats.average_total_pipeline_latency(), max_prediction)
+        } else {
+            poll_timestamp
+        };
+
+        // Guarantee that sent timestamps never go backwards by sending the poll time
+        let reported_timestamp = poll_timestamp;
 
         for (id, motion) in &mut device_motions {
+            let velocity_multiplier = *self.connection_context.velocities_multiplier.read();
+            motion.linear_velocity *= velocity_multiplier;
+            motion.angular_velocity *= velocity_multiplier;
+
             if *id == *HEAD_ID {
-                *motion = predict_motion(target_timestamp, poll_timestamp, *motion);
+                *motion = motion.predict(poll_timestamp, target_timestamp);
 
                 let mut head_pose_queue = self.connection_context.head_pose_queue.write();
 
-                head_pose_queue.push_back((target_timestamp, motion.pose));
+                head_pose_queue.push_back((reported_timestamp, motion.pose));
 
                 while head_pose_queue.len() > 1024 {
                     head_pose_queue.pop_front();
@@ -258,9 +267,10 @@ impl ClientCoreContext {
                 motion.linear_velocity = Vec3::ZERO;
                 motion.angular_velocity = Vec3::ZERO;
             } else if let Some(stats) = &*self.connection_context.statistics_manager.lock() {
-                let tracker_timestamp = poll_timestamp + stats.tracker_prediction_offset();
+                let tracker_timestamp = poll_timestamp
+                    + Duration::min(stats.tracker_prediction_offset(), max_prediction);
 
-                *motion = predict_motion(tracker_timestamp, poll_timestamp, *motion);
+                *motion = motion.predict(poll_timestamp, tracker_timestamp);
             }
         }
 
@@ -293,7 +303,7 @@ impl ClientCoreContext {
         if let Some(sender) = &mut *self.connection_context.tracking_sender.lock() {
             sender
                 .send_header(&Tracking {
-                    target_timestamp,
+                    target_timestamp: reported_timestamp,
                     device_motions,
                     hand_skeletons,
                     face_data,
@@ -301,16 +311,23 @@ impl ClientCoreContext {
                 .ok();
 
             if let Some(stats) = &mut *self.connection_context.statistics_manager.lock() {
-                stats.report_input_acquired(target_timestamp);
+                stats.report_input_acquired(reported_timestamp);
             }
         }
     }
 
+    pub fn get_total_prediction_offset(&self) -> Duration {
+        dbg_client_core!("get_total_prediction_offset");
+
+        if let Some(stats) = &*self.connection_context.statistics_manager.lock() {
+            stats.average_total_pipeline_latency()
+        } else {
+            Duration::ZERO
+        }
+    }
+
     /// The callback should return true if the frame was successfully submitted to the decoder
-    pub fn set_decoder_input_callback(
-        &self,
-        callback: Box<dyn FnMut(Duration, &[u8]) -> bool + Send>,
-    ) {
+    pub fn set_decoder_input_callback(&self, callback: Box<DecoderCallback>) {
         dbg_client_core!("set_decoder_input_callback");
 
         *self.connection_context.decoder_callback.lock() = Some(callback);
@@ -350,7 +367,8 @@ impl ClientCoreContext {
             }
         }
         let view_params = self.connection_context.view_params.read();
-        let view_params = [
+
+        [
             ViewParams {
                 pose: head_pose * view_params[0].pose,
                 fov: view_params[0].fov,
@@ -359,9 +377,7 @@ impl ClientCoreContext {
                 pose: head_pose * view_params[1].pose,
                 fov: view_params[1].fov,
             },
-        ];
-
-        view_params
+        ]
     }
 
     pub fn report_submit(&self, timestamp: Duration, vsync_queue: Duration) {
@@ -393,27 +409,5 @@ impl Drop for ClientCoreContext {
 
         #[cfg(target_os = "android")]
         alvr_system_info::set_wifi_lock(false);
-    }
-}
-
-pub fn predict_motion(
-    target_timestamp: Duration,
-    current_timestamp: Duration,
-    motion: DeviceMotion,
-) -> DeviceMotion {
-    let delta_time_s = target_timestamp
-        .saturating_sub(current_timestamp)
-        .as_secs_f32();
-
-    let delta_position = motion.linear_velocity * delta_time_s;
-    let delta_orientation = Quat::from_scaled_axis(motion.angular_velocity * delta_time_s);
-
-    DeviceMotion {
-        pose: Pose {
-            orientation: delta_orientation * motion.pose.orientation,
-            position: motion.pose.position + delta_position,
-        },
-        linear_velocity: motion.linear_velocity,
-        angular_velocity: motion.angular_velocity,
     }
 }

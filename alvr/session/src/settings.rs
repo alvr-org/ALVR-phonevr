@@ -556,23 +556,111 @@ pub enum H264Profile {
     Baseline = 2,
 }
 
-#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct RgbChromaKeyConfig {
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = 0, max = 255)))]
+    pub red: u8,
+
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = 0, max = 255)))]
+    pub green: u8,
+
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = 0, max = 255)))]
+    pub blue: u8,
+
+    #[schema(strings(help = "The threshold is applied per-channel"))]
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = 1, max = 255)))]
+    pub distance_threshold: u8,
+
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = 0.01, max = 1.0, step = 0.01)))]
+    pub feathering: f32,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct HsvChromaKeyConfig {
+    #[schema(strings(display_name = "Hue start max"), suffix = "°")]
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = -179.0, max = 539.0, step = 1.0)))]
+    pub hue_start_max_deg: f32,
+
+    #[schema(strings(display_name = "Hue start min"), suffix = "°")]
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = -179.0, max = 539.0, step = 1.0)))]
+    pub hue_start_min_deg: f32,
+
+    #[schema(strings(display_name = "Hue end min"), suffix = "°")]
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = -179.0, max = 539.0, step = 1.0)))]
+    pub hue_end_min_deg: f32,
+
+    #[schema(strings(display_name = "Hue end max"), suffix = "°")]
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = -179.0, max = 539.0, step = 1.0)))]
+    pub hue_end_max_deg: f32,
+
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = -0.5, max = 1.5, step = 0.01)))]
+    pub saturation_start_max: f32,
+
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = -0.5, max = 1.5, step = 0.01)))]
+    pub saturation_start_min: f32,
+
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = -0.5, max = 1.5, step = 0.01)))]
+    pub saturation_end_min: f32,
+
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = -0.5, max = 1.5,step = 0.01)))]
+    pub saturation_end_max: f32,
+
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = -0.5, max = 1.5, step = 0.01)))]
+    pub value_start_max: f32,
+
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = -0.5, max = 1.5, step = 0.01)))]
+    pub value_start_min: f32,
+
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = -0.5, max = 1.5, step = 0.01)))]
+    pub value_end_min: f32,
+
+    #[schema(flag = "real-time")]
+    #[schema(gui(slider(min = -0.5, max = 1.5, step = 0.01)))]
+    pub value_end_max: f32,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[schema(gui = "button_group")]
 pub enum PassthroughMode {
-    AugmentedReality {
-        #[schema(gui(slider(min = 0.0, max = 1.0, step = 0.01)))]
-        brightness: f32,
-    },
     Blend {
+        #[schema(strings(
+            help = "Enabling this will adapt transparency based on the brightness of each pixel.
+This is a similar effect to AR glasses."
+        ))]
+        #[schema(flag = "real-time")]
+        premultiplied_alpha: bool,
+
+        #[schema(flag = "real-time")]
         #[schema(gui(slider(min = 0.0, max = 1.0, step = 0.01)))]
-        opacity: f32,
+        threshold: f32,
     },
+
+    #[schema(strings(display_name = "RGB Chroma Key"))]
+    RgbChromaKey(#[schema(flag = "real-time")] RgbChromaKeyConfig),
+
+    #[schema(strings(display_name = "HSV Chroma Key"))]
+    HsvChromaKey(#[schema(flag = "real-time")] HsvChromaKeyConfig),
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct VideoConfig {
-    #[schema(strings(help = r"Augmented reality: corresponds to premultiplied alpha
-Blend: corresponds to un-premultiplied alpha"))]
+    #[schema(flag = "real-time")]
     pub passthrough: Switch<PassthroughMode>,
 
     pub bitrate: BitrateConfig,
@@ -601,6 +689,12 @@ Blend: corresponds to un-premultiplied alpha"))]
 
     #[schema(gui(slider(min = 0.50, max = 0.99, step = 0.01)))]
     pub buffering_history_weight: f32,
+
+    #[schema(strings(
+        help = r"This works only on Windows. It shouldn't be disabled except in certain circumstances when you know the VR game will not meet the target framerate."
+    ))]
+    #[schema(flag = "real-time")]
+    pub enforce_server_frame_pacing: bool,
 
     #[schema(flag = "steamvr-restart")]
     pub encoder_config: EncoderConfig,
@@ -681,6 +775,8 @@ pub enum MicrophoneDevicesConfig {
     VoiceMeeterAux,
     #[schema(strings(display_name = "VoiceMeeter VAIO3"))]
     VoiceMeeterVaio3,
+    #[schema(strings(display_name = "Virtual Audio Cable"))]
+    VAC,
     Custom {
         #[schema(strings(help = "This device is used by ALVR to output microphone audio"))]
         sink: CustomAudioDeviceConfig,
@@ -705,7 +801,14 @@ pub struct AudioConfig {
     #[schema(strings(display_name = "Headset speaker"))]
     pub game_audio: Switch<GameAudioConfig>,
 
-    #[schema(strings(display_name = "Headset microphone"))]
+    #[cfg_attr(
+        windows,
+        schema(strings(
+            display_name = "Headset microphone",
+            notice = r"To be able to use the microphone on Windows, you need to install VB-Cable or VoiceMeeter"
+        ))
+    )]
+    #[cfg_attr(not(windows), schema(strings(display_name = "Headset microphone")))]
     pub microphone: Switch<MicrophoneConfig>,
 }
 
@@ -729,6 +832,7 @@ pub struct FaceTrackingSourcesConfig {
     pub face_tracking_fb: bool,
     pub eye_expressions_htc: bool,
     pub lip_expressions_htc: bool,
+    pub face_tracking_pico: bool,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
@@ -749,6 +853,7 @@ pub struct FaceTrackingConfig {
 #[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
 pub struct BodyTrackingSourcesConfig {
     pub body_tracking_fb: Switch<BodyTrackingFBConfig>,
+    pub body_tracking_bd: Switch<BodyTrackingBDConfig>,
     // todo:
     // pub detached_controllers_as_feet: bool,
     // unfortunately multimodal is incompatible with body tracking. To make this usable we need to
@@ -758,6 +863,12 @@ pub struct BodyTrackingSourcesConfig {
 #[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
 pub struct BodyTrackingFBConfig {
     pub full_body: bool,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
+pub struct BodyTrackingBDConfig {
+    pub high_accuracy: bool,
+    pub prompt_calibration_on_start: bool,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
@@ -800,6 +911,8 @@ pub enum ControllersEmulationMode {
     Quest3Plus,
     #[schema(strings(display_name = "Quest Pro"))]
     QuestPro,
+    #[schema(strings(display_name = "Pico 4"))]
+    Pico4,
     #[schema(strings(display_name = "Valve Index"))]
     ValveIndex,
     #[schema(strings(display_name = "Vive Wand"))]
@@ -1101,6 +1214,12 @@ Tilted: the world gets tilted when long pressing the oculus button. This is usef
     #[schema(flag = "steamvr-restart")]
     #[schema(strings(display_name = "VMC"))]
     pub vmc: Switch<VMCConfig>,
+
+    #[schema(strings(
+        help = "Maximum prediction for head and controllers. Used to avoid too much jitter during loading."
+    ))]
+    #[schema(gui(slider(min = 0, max = 200, step = 5)), suffix = "ms")]
+    pub max_prediction_ms: u64,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone, Copy)]
@@ -1114,6 +1233,7 @@ pub enum SocketProtocol {
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct DiscoveryConfig {
+    #[cfg_attr(target_os = "linux", schema(flag = "hidden"))]
     #[schema(strings(
         help = "Allow untrusted clients to connect without confirmation. This is not recommended for security reasons."
     ))]
@@ -1147,16 +1267,40 @@ TCP: Slower than UDP, but more stable. Pick this if you experience video or audi
     ))]
     pub wired_client_autolaunch: bool,
 
-    #[schema(strings(
-        help = "This script will be ran when the headset connects. Env var ACTION will be set to `connect`."
-    ))]
-    pub on_connect_script: String,
+    #[cfg_attr(
+        windows,
+        schema(strings(
+            help = "If on_connect.bat exists alongside session.json, it will be run on headset connect. Env var ACTION will be set to `connect`."
+        ))
+    )]
+    #[cfg_attr(
+        not(windows),
+        schema(strings(
+            help = "If on_connect.sh exists alongside session.json, it will be run on headset connect. Env var ACTION will be set to `connect`."
+        ))
+    )]
+    pub enable_on_connect_script: bool,
+
+    #[cfg_attr(
+        windows,
+        schema(strings(
+            help = "If on_disconnect.bat exists alongside session.json, it will be run on headset disconnect. Env var ACTION will be set to `disconnect`."
+        ))
+    )]
+    #[cfg_attr(
+        not(windows),
+        schema(strings(
+            help = "If on_disconnect.sh exists alongside session.json, it will be run on headset disconnect. Env var ACTION will be set to `disconnect`."
+        ))
+    )]
+    #[schema(flag = "real-time")]
+    pub enable_on_disconnect_script: bool,
 
     #[schema(strings(
-        help = "This script will be ran when the headset disconnects, or when SteamVR shuts down. Env var ACTION will be set to `disconnect`."
+        help = "Allow cross-origin browser requests to control ALVR settings remotely."
     ))]
     #[schema(flag = "real-time")]
-    pub on_disconnect_script: String,
+    pub allow_untrusted_http: bool,
 
     #[schema(strings(
         help = r#"If the client, server or the network discarded one packet, discard packets until a IDR packet is found.
@@ -1324,6 +1468,13 @@ pub struct ExtraConfig {
     pub capture: CaptureConfig,
     pub logging: LoggingConfig,
     pub patches: Patches,
+
+    #[schema(
+        strings(help = "Linear and angular velocity multiplier for debug purposes.
+It does not update in real time.")
+    )]
+    pub velocities_multiplier: f32,
+
     pub open_setup_wizard: bool,
 }
 
@@ -1373,9 +1524,32 @@ pub fn session_settings_default() -> SettingsDefault {
             passthrough: SwitchDefault {
                 enabled: false,
                 content: PassthroughModeDefault {
-                    variant: PassthroughModeDefaultVariant::AugmentedReality,
-                    AugmentedReality: PassthroughModeAugmentedRealityDefault { brightness: 0.4 },
-                    Blend: PassthroughModeBlendDefault { opacity: 0.5 },
+                    variant: PassthroughModeDefaultVariant::Blend,
+                    Blend: PassthroughModeBlendDefault {
+                        premultiplied_alpha: true,
+                        threshold: 0.5,
+                    },
+                    RgbChromaKey: RgbChromaKeyConfigDefault {
+                        red: 0,
+                        green: 255,
+                        blue: 0,
+                        distance_threshold: 85,
+                        feathering: 0.05,
+                    },
+                    HsvChromaKey: HsvChromaKeyConfigDefault {
+                        hue_start_max_deg: 70.0,
+                        hue_start_min_deg: 80.0,
+                        hue_end_min_deg: 160.0,
+                        hue_end_max_deg: 170.0,
+                        saturation_start_max: 0.2,
+                        saturation_start_min: 0.3,
+                        saturation_end_min: 1.0,
+                        saturation_end_max: 1.1,
+                        value_start_max: 0.0,
+                        value_start_min: 0.1,
+                        value_end_min: 1.0,
+                        value_end_max: 1.1,
+                    },
                 },
             },
             adapter_index: 0,
@@ -1384,6 +1558,7 @@ pub fn session_settings_default() -> SettingsDefault {
             preferred_fps: 72.,
             max_buffering_frames: 2.0,
             buffering_history_weight: 0.90,
+            enforce_server_frame_pacing: true,
             bitrate: BitrateConfigDefault {
                 gui_collapsed: false,
                 mode: BitrateModeDefault {
@@ -1625,6 +1800,7 @@ pub fn session_settings_default() -> SettingsDefault {
                         face_tracking_fb: true,
                         eye_expressions_htc: true,
                         lip_expressions_htc: true,
+                        face_tracking_pico: true,
                     },
                     sink: FaceTrackingSinkConfigDefault {
                         VrchatEyeOsc: FaceTrackingSinkConfigVrchatEyeOscDefault { port: 9000 },
@@ -1640,6 +1816,13 @@ pub fn session_settings_default() -> SettingsDefault {
                         body_tracking_fb: SwitchDefault {
                             enabled: true,
                             content: BodyTrackingFBConfigDefault { full_body: true },
+                        },
+                        body_tracking_bd: SwitchDefault {
+                            enabled: true,
+                            content: BodyTrackingBDConfigDefault {
+                                high_accuracy: true,
+                                prompt_calibration_on_start: true,
+                            },
                         },
                     },
                     sink: BodyTrackingSinkConfigDefault {
@@ -1745,7 +1928,7 @@ pub fn session_settings_default() -> SettingsDefault {
                             deactivation_delay: 100,
                         },
                     },
-                    steamvr_pipeline_frames: 3.0,
+                    steamvr_pipeline_frames: 2.1,
                     linear_velocity_cutoff: 0.05,
                     angular_velocity_cutoff: 10.0,
                     left_controller_position_offset: ArrayDefault {
@@ -1782,6 +1965,7 @@ pub fn session_settings_default() -> SettingsDefault {
             rotation_recentering_mode: RotationRecenteringModeDefault {
                 variant: RotationRecenteringModeDefaultVariant::Yaw,
             },
+            max_prediction_ms: 100,
         },
         connection: ConnectionConfigDefault {
             stream_protocol: SocketProtocolDefault {
@@ -1825,8 +2009,9 @@ pub fn session_settings_default() -> SettingsDefault {
             max_queued_server_video_frames: 1024,
             avoid_video_glitching: false,
             minimum_idr_interval_ms: 100,
-            on_connect_script: "".into(),
-            on_disconnect_script: "".into(),
+            enable_on_connect_script: false,
+            enable_on_disconnect_script: false,
+            allow_untrusted_http: false,
             packet_size: 1400,
             statistics_history_size: 256,
         },
@@ -1892,6 +2077,7 @@ pub fn session_settings_default() -> SettingsDefault {
                 linux_async_compute: false,
                 linux_async_reprojection: false,
             },
+            velocities_multiplier: 1.0,
             open_setup_wizard: alvr_common::is_stable() || alvr_common::is_nightly(),
         },
     }

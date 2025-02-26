@@ -20,8 +20,8 @@ use alvr_common::{
 use alvr_events::{AdbEvent, ButtonEvent, EventType};
 use alvr_packets::{
     BatteryInfo, ClientConnectionResult, ClientControlPacket, ClientListAction, ClientStatistics,
-    NegotiatedStreamingConfig, ReservedClientControlPacket, ServerControlPacket, Tracking,
-    VideoPacketHeader, AUDIO, HAPTICS, STATISTICS, TRACKING, VIDEO,
+    NegotiatedStreamingConfig, RealTimeConfig, ReservedClientControlPacket, ServerControlPacket,
+    Tracking, VideoPacketHeader, AUDIO, HAPTICS, STATISTICS, TRACKING, VIDEO,
 };
 use alvr_session::{
     BodyTrackingSinkConfig, CodecType, ControllersEmulationMode, FrameSize, H264Profile,
@@ -43,6 +43,7 @@ use std::{
 const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
 pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(500);
+const REAL_TIME_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 
 const MAX_UNREAD_PACKETS: usize = 10; // Applies per stream
 
@@ -82,6 +83,7 @@ pub fn contruct_openvr_config(session: &SessionConfig) -> OpenvrConfig {
             ControllersEmulationMode::Quest2Touch => 1,
             ControllersEmulationMode::Quest3Plus => 2,
             ControllersEmulationMode::QuestPro => 3,
+            ControllersEmulationMode::Pico4 => 10,
             ControllersEmulationMode::ValveIndex => 20,
             ControllersEmulationMode::ViveWand => 40,
             ControllersEmulationMode::ViveTracker => 41,
@@ -251,15 +253,14 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
         dbg_connection!("handshake_loop: Try connect to wired device");
 
         let mut wired_client_ips = HashMap::new();
-        if let Some((client_hostname, _)) =
-            SESSION_MANAGER
-                .read()
-                .client_list()
-                .iter()
-                .find(|(hostname, info)| {
-                    info.connection_state == ConnectionState::Disconnected
-                        && hostname.as_str() == WIRED_CLIENT_HOSTNAME
-                })
+        if SESSION_MANAGER
+            .read()
+            .client_list()
+            .iter()
+            .any(|(hostname, info)| {
+                info.connection_state == ConnectionState::Disconnected
+                    && hostname.as_str() == WIRED_CLIENT_HOSTNAME
+            })
         {
             // Make sure the wired connection is created once and kept alive
             let wired_connection = if let Some(connection) = &wired_connection {
@@ -313,14 +314,15 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
                 }
             };
 
-            if let WiredConnectionStatus::NotReady(m) = status {
-                dbg_connection!("handshake_loop: Wired connection not ready: {m}");
+            #[cfg_attr(not(debug_assertions), expect(unused_variables))]
+            if let WiredConnectionStatus::NotReady(s) = status {
+                dbg_connection!("handshake_loop: Wired connection not ready: {s}");
                 thread::sleep(RETRY_CONNECT_MIN_INTERVAL);
                 continue;
             }
 
             let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
-            wired_client_ips.insert(client_ip, client_hostname.to_owned());
+            wired_client_ips.insert(client_ip, WIRED_CLIENT_HOSTNAME.to_owned());
         }
 
         if !wired_client_ips.is_empty()
@@ -766,6 +768,7 @@ fn connection_pipeline(
             game_audio_sample_rate,
             enable_foveated_encoding,
             use_multimodal_protocol: streaming_caps.multimodal_protocol,
+            use_full_range,
             encoding_gamma,
             enable_hdr,
             wired,
@@ -1012,7 +1015,8 @@ fn connection_pipeline(
             thread::spawn(|| ())
         };
 
-    *ctx.tracking_manager.write() = TrackingManager::new();
+    *ctx.tracking_manager.write() =
+        TrackingManager::new(initial_settings.connection.statistics_history_size);
     let hand_gesture_manager = Arc::new(Mutex::new(HandGestureManager::new()));
 
     let tracking_receive_thread = thread::spawn({
@@ -1068,6 +1072,29 @@ fn connection_pipeline(
     });
 
     let control_sender = Arc::new(Mutex::new(control_sender));
+
+    let real_time_update_thread = thread::spawn({
+        let control_sender = Arc::clone(&control_sender);
+        let client_hostname = client_hostname.clone();
+        move || {
+            while is_streaming(&client_hostname) {
+                let config = {
+                    let session_manager_lock = SESSION_MANAGER.read();
+                    let settings = session_manager_lock.settings();
+
+                    RealTimeConfig {
+                        passthrough: settings.video.passthrough.clone().into_option(),
+                    }
+                };
+
+                if let Ok(config) = alvr_packets::encode_real_time_config(&config) {
+                    control_sender.lock().send(&config).ok();
+                }
+
+                thread::sleep(REAL_TIME_UPDATE_INTERVAL);
+            }
+        }
+    });
 
     let keepalive_thread = thread::spawn({
         let control_sender = Arc::clone(&control_sender);
@@ -1361,10 +1388,12 @@ fn connection_pipeline(
     });
 
     {
-        let on_connect_script = initial_settings.connection.on_connect_script;
-
-        if !on_connect_script.is_empty() {
-            info!("Running on connect script (connect): {on_connect_script}");
+        if initial_settings.connection.enable_on_connect_script {
+            let on_connect_script = FILESYSTEM_LAYOUT.get().map(|l| l.connect_script()).unwrap();
+            info!(
+                "Running on connect script (connect): {}",
+                on_connect_script.display()
+            );
             if let Err(e) = Command::new(&on_connect_script)
                 .env("ACTION", "connect")
                 .spawn()
@@ -1403,13 +1432,19 @@ fn connection_pipeline(
         ClientListAction::SetConnectionState(ConnectionState::Disconnecting),
     );
 
-    let on_disconnect_script = session_manager_lock
+    let enable_on_disconnect_script = session_manager_lock
         .settings()
         .connection
-        .on_disconnect_script
-        .clone();
-    if !on_disconnect_script.is_empty() {
-        info!("Running on disconnect script (disconnect): {on_disconnect_script}");
+        .enable_on_disconnect_script;
+    if enable_on_disconnect_script {
+        let on_disconnect_script = FILESYSTEM_LAYOUT
+            .get()
+            .map(|l| l.disconnect_script())
+            .unwrap();
+        info!(
+            "Running on disconnect script (disconnect): {}",
+            on_disconnect_script.display()
+        );
         if let Err(e) = Command::new(&on_disconnect_script)
             .env("ACTION", "disconnect")
             .spawn()
@@ -1428,6 +1463,7 @@ fn connection_pipeline(
     microphone_thread.join().ok();
     tracking_receive_thread.join().ok();
     statistics_thread.join().ok();
+    real_time_update_thread.join().ok();
     control_receive_thread.join().ok();
     stream_receive_thread.join().ok();
     keepalive_thread.join().ok();

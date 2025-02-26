@@ -155,7 +155,7 @@ fn tracking_thread(
             down: -1.0,
         },
     };
-    context.send_view_params([views_params.clone(), views_params]);
+    context.send_view_params([views_params, views_params]);
 
     let mut loop_deadline = Instant::now();
     while streaming.value() {
@@ -273,6 +273,7 @@ fn client_thread(
 
                     window_output.decoder_codec = Some(codec);
                 }
+                ClientCoreEvent::RealTimeConfig(_) => (),
             }
 
             output_sender.send(window_output.clone()).ok();

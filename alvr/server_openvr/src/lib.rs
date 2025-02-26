@@ -129,15 +129,17 @@ extern "C" fn driver_ready_idle(set_default_chap: bool) {
                             .unwrap_or_else(FfiDeviceMotion::default);
                         let ffi_left_controller_motion = context
                             .get_device_motion(*HAND_LEFT_ID, sample_timestamp)
-                            .map(|m| tracking::to_ffi_motion(*HAND_LEFT_ID, m));
+                            .map(|m| tracking::to_ffi_motion(*HAND_LEFT_ID, m))
+                            .filter(|_| tracked);
                         let ffi_right_controller_motion = context
                             .get_device_motion(*HAND_RIGHT_ID, sample_timestamp)
-                            .map(|m| tracking::to_ffi_motion(*HAND_RIGHT_ID, m));
+                            .map(|m| tracking::to_ffi_motion(*HAND_RIGHT_ID, m))
+                            .filter(|_| tracked);
 
                         let (
-                            use_separate_hand_trackers,
                             ffi_left_hand_skeleton,
                             ffi_right_hand_skeleton,
+                            use_separate_hand_trackers,
                             predict_hand_skeleton,
                         ) = if let Some(ControllersConfig {
                             hand_skeleton: Switch::Enabled(hand_skeleton_config),
@@ -164,13 +166,13 @@ extern "C" fn driver_ready_idle(set_default_chap: bool) {
                                 });
 
                             (
-                                hand_skeleton_config.steamvr_input_2_0,
                                 tracked.then_some(left_hand_skeleton).flatten(),
                                 tracked.then_some(right_hand_skeleton).flatten(),
+                                hand_skeleton_config.steamvr_input_2_0,
                                 hand_skeleton_config.predict,
                             )
                         } else {
-                            (false, None, None, false)
+                            (None, None, false, false)
                         };
 
                         let ffi_left_hand_data = FfiHandData {
@@ -381,14 +383,31 @@ extern "C" fn report_present(timestamp_ns: u64, offset_ns: u64) {
 }
 
 extern "C" fn wait_for_vsync() {
+    // Default 120Hz-ish wait if StatisticsManager isn't up.
+    // We use 120Hz-ish so that SteamVR doesn't accidentally get
+    // any weird ideas about our display Hz with its frame pacing.
+    static PRE_HEADSET_STATS_WAIT_INTERVAL: Duration = Duration::from_millis(8);
+
     // NB: don't sleep while locking SERVER_DATA_MANAGER or SERVER_CORE_CONTEXT
     let sleep_duration = SERVER_CORE_CONTEXT
         .read()
         .as_ref()
-        .and_then(|ctx| ctx.duration_until_next_vsync())
-        .unwrap_or(Duration::from_millis(50));
+        .and_then(|ctx| ctx.duration_until_next_vsync());
 
-    thread::sleep(sleep_duration);
+    if let Some(duration) = sleep_duration {
+        if alvr_server_core::settings()
+            .video
+            .enforce_server_frame_pacing
+        {
+            thread::sleep(duration);
+        } else {
+            thread::yield_now();
+        }
+    } else {
+        // StatsManager isn't up because the headset hasn't connected,
+        // safety fallback to prevent deadlocking.
+        thread::sleep(PRE_HEADSET_STATS_WAIT_INTERVAL);
+    }
 }
 
 pub extern "C" fn shutdown_driver() {
